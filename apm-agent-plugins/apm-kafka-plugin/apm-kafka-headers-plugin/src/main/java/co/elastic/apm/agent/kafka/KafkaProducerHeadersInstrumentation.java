@@ -27,6 +27,7 @@ package co.elastic.apm.agent.kafka;
 import co.elastic.apm.agent.bci.VisibleForAdvice;
 import co.elastic.apm.agent.impl.ElasticApmTracer;
 import co.elastic.apm.agent.impl.transaction.Span;
+import co.elastic.apm.agent.impl.transaction.Transaction;
 import co.elastic.apm.agent.kafka.helper.KafkaInstrumentationHeadersHelper;
 import co.elastic.apm.agent.kafka.helper.KafkaInstrumentationHelper;
 import net.bytebuddy.asm.Advice;
@@ -48,7 +49,7 @@ import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.takesArgument;
 
 public class KafkaProducerHeadersInstrumentation extends BaseKafkaHeadersInstrumentation {
-
+    public static final String FRAMEWORK_NAME = "Kafka";
     @VisibleForAdvice
     @SuppressWarnings("WeakerAccess")
     public static final Logger logger = LoggerFactory.getLogger(KafkaProducerInstrumentation.class);
@@ -85,14 +86,27 @@ public class KafkaProducerHeadersInstrumentation extends BaseKafkaHeadersInstrum
                                       @Advice.Argument(0) final ProducerRecord record,
                                       @Nullable @Advice.Argument(value = 1, readOnly = false) Callback callback) {
             Span span = null;
-
+            //logger.info("beforeSend");
             //noinspection ConstantConditions
             KafkaInstrumentationHelper<Callback, ProducerRecord, KafkaProducer> helper = kafkaInstrHelperManager.getForClassLoaderOfClass(KafkaProducer.class);
 
             if (helper != null) {
+                //logger.info("helper is not null");
                 span = helper.onSendStart(record);
+                if (span == null) {
+                    Transaction transaction = tracer.startRootTransaction(KafkaProducerHeadersInstrumentation.class.getClassLoader());
+                    if (transaction != null) {
+                        String topic = record.topic();
+                        transaction.withType("messaging").withName("Kafka record to " + topic).activate();
+                        transaction.setFrameworkName(FRAMEWORK_NAME);
+
+                        span = helper.onSendStart(record);
+                    }
+                }
             }
+
             if (span == null) {
+                logger.info("Span is null returning");
                 return null;
             }
 
@@ -148,6 +162,14 @@ public class KafkaProducerHeadersInstrumentation extends BaseKafkaHeadersInstrum
             KafkaInstrumentationHelper<Callback, ProducerRecord, KafkaProducer> helper = kafkaInstrHelperManager.getForClassLoaderOfClass(KafkaProducer.class);
             if (helper != null && span != null) {
                 helper.onSendEnd(span, record, thiz, throwable);
+            }
+            try {
+                Transaction transaction = tracer.currentTransaction();
+                if (transaction != null && "messaging".equals(transaction.getType())) {
+                    transaction.deactivate().end();
+                }
+            } catch (Exception e) {
+                logger.error("Error in Kafka Producer Headers Instrumentation", e);
             }
             return false;
         }
